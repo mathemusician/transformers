@@ -22,13 +22,15 @@ https://huggingface.co/models?filter=masked-lm
 # You can also adapt this script on your own masked language modeling task. Pointers for this are left as comments.
 
 import logging
+import inspect
 import math
+import numpy
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset, load_metric
 
 import transformers
 from transformers import (
@@ -39,12 +41,19 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.sparseml_utils import (
+    export_model,
+    preprocess_state_dict,
+    load_recipe
+)
+from sparseml_utils import (
+    SparseMLMaskedLanguageModelingTrainer,
+)
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -71,6 +80,15 @@ class ModelArguments:
     model_type: Optional[str] = field(
         default=None,
         metadata={"help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
+    )
+    distill_teacher: Optional[str] = field(
+        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+    )
+    distill_temperature: Optional[float] = field(
+        default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
+    )
+    distill_hardness: Optional[float] = field(
+        default=1.0, metadata={"help": "Proportion of loss coming from teacher model."}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -105,12 +123,32 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
+    recipe: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
+                  "for more information"},
+    )
+    onnx_export_path: Optional[str] = field(
+        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
+    )
+    num_exported_samples: Optional[int] = field(
+        default=20, metadata={"help": "Number of exported samples, default to 20"}
+    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
+
+    # Extra dataset
+    dataset_name_2: Optional[str] = field(
+        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
+    dataset_config_name_2: Optional[str] = field(
+        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
+    )
+
     train_file: Optional[str] = field(default=None, metadata={"help": "The input training data file (a text file)."})
     validation_file: Optional[str] = field(
         default=None,
@@ -266,6 +304,29 @@ def main():
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
+    import pdb; pdb.set_trace()
+    # Load extra dataset if specified, and concatenate with the original one
+    if data_args.dataset_name_2 is not None:
+        # Downloading and loading a dataset from the hub.
+        datasets_2 = load_dataset(data_args.dataset_name_2, data_args.dataset_config_name_2, cache_dir=model_args.cache_dir)
+        if "validation" not in datasets_2.keys():
+            datasets_2["validation"] = load_dataset(
+                data_args.dataset_name_2,
+                data_args.dataset_config_name_2,
+                split=f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+            )
+            datasets_2["train"] = load_dataset(
+                data_args.dataset_name_2,
+                data_args.dataset_config_name_2,
+                split=f"train[{data_args.validation_split_percentage}%:]",
+                cache_dir=model_args.cache_dir,
+            )
+        # Concatenate two datasets
+        if datasets is not None:
+            for split in ["validation", "train"]:
+                datasets[split] = concatenate_datasets([datasets[split], datasets_2[split]])
+    
     # Load pretrained model and tokenizer
     #
     # Distributed training:
@@ -299,7 +360,7 @@ def main():
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
-
+    import pdb; pdb.set_trace()
     if model_args.model_name_or_path:
         model = AutoModelForMaskedLM.from_pretrained(
             model_args.model_name_or_path,
@@ -314,6 +375,17 @@ def main():
         model = AutoModelForMaskedLM.from_config(config)
 
     model.resize_token_embeddings(len(tokenizer))
+
+    teacher_model = None
+    if model_args.distill_teacher is not None:
+        teacher_model = AutoModelForMaskedLM.from_pretrained(
+            model_args.distill_teacher,
+            from_tf=bool(".ckpt" in model_args.distill_teacher),
+            cache_dir=model_args.cache_dir,
+        )
+        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
+        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        logger.info("Teacher Model has %s parameters", params)
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -400,7 +472,7 @@ def main():
         #
         # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
         # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
-
+        import pdb; pdb.set_trace()
         tokenized_datasets = tokenized_datasets.map(
             group_texts,
             batched=True,
@@ -431,14 +503,58 @@ def main():
         pad_to_multiple_of=8 if pad_to_multiple_of_8 else None,
     )
 
+    # # Load possible existing recipe and new one passed in through command argument
+    # existing_recipe = load_recipe(model_args.model_name_or_path)
+    # new_recipe = data_args.recipe
+
+    # from sklearn.metrics import accuracy_score
+
+    # def accuracy(output_orig, label, topk=(1,)):
+    #     """Computes the precision@k for the specified values of k"""
+
+    #     index = torch.nonzero(label+100)
+    #     target = label[index].view(-1)
+    #     output = output_orig[index].squeeze(1)
+
+    #     maxk = max(topk)
+    #     batch_size = target.size(0)
+
+    #     _, pred = output.topk(maxk, 1, True, True)
+    #     pred = pred.t()
+    #     correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    #     res = []
+    #     for k in topk:
+    #         correct_k = correct[:k].view(-1).float().sum(0)
+    #         res.append(correct_k.mul_(100.0 / batch_size))
+    #     return res
+
+    # accuracy_metric = load_metric("accuracy")
+    # def compute_metrics(eval_pred):
+    #     prediction_scores, labels = eval_pred.predictions, eval_pred.label_ids
+    #     vocab_size = prediction_scores.shape[-1]
+    #     import pdb; pdb.set_trace()
+    #     acc = accuracy(prediction_scores.view(-1, vocab_size).data, labels.view(-1))[0]
+        
+    #     #predictions = numpy.argmax(logits, axis=-1)
+    #     #return {accuracy_metric.compute(predictions=predictions, references=labels)}
+    #     return {"accuracy": acc}
+
+    compute_metrics = None
     # Initialize our Trainer
-    trainer = Trainer(
+    trainer = SparseMLMaskedLanguageModelingTrainer(
+        model_args.model_name_or_path,
+        [data_args.recipe],
+        teacher=teacher_model,
+        distill_hardness=model_args.distill_hardness,
+        distill_temperature=model_args.distill_temperature,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        compute_metrics=compute_metrics
     )
 
     # Training
@@ -489,6 +605,14 @@ def main():
                 kwargs["dataset"] = data_args.dataset_name
 
         trainer.push_to_hub(**kwargs)
+
+    if data_args.onnx_export_path:
+        logger.info("*** Export to ONNX ***")
+        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        exporter = MaskedLanguageModelingModuleExporter(model, output_dir=data_args.onnx_export_path)
+        # TODO: how to use AutoModelForMaskedLM here to avoid specifying Bert?
+        forward_args_spec = inspect.getfullargspec(BertForMaskedLM.forward)
+        export_model(model, forward_args_spec, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
 
 def _mp_fn(index):
