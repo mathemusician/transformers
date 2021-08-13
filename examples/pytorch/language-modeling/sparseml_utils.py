@@ -1,22 +1,12 @@
-import collections
-import inspect
-import math
-import os
-from typing import Any, Optional
+from typing import Any
 
 import numpy
 import torch
 import torch.nn.functional as F
 
-import onnxruntime
-from sparseml.pytorch.optim.manager import ScheduledModifierManager
-from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
-from sparseml.pytorch.utils import ModuleExporter, logger
+from sparseml.pytorch.utils import ModuleExporter
 
-from transformers.sparse import export_model, SparseMLTrainer
-
-from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
-from transformers.models.bert.modeling_bert import BertForQuestionAnswering
+from transformers.sparse import SparseMLTrainer
 
 
 class SparseMLMaskedLanguageModelingTrainer(SparseMLTrainer):
@@ -28,7 +18,7 @@ class SparseMLMaskedLanguageModelingTrainer(SparseMLTrainer):
     :param distill_hardness: ratio of loss by teacher targets (between 0 and 1)
     :param distill_temperature: temperature for distillation
     :param args, kwargs: arguments passed into parent class
-    """ 
+    """
     def compute_loss(self, model, inputs, return_outputs=False):
         """
         Computing loss using teacher/student distillation

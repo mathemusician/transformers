@@ -169,6 +169,7 @@ def preprocess_state_dict(pretrained_model_name_or_path):
     if pretrained_model_name_or_path is not None:
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
         if os.path.isdir(pretrained_model_name_or_path):
+            is_qat_recipe = False
             if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
                 recipe = os.path.join(pretrained_model_name_or_path, RECIPE_NAME)
                 manager = ScheduledModifierManager.from_yaml(recipe)

@@ -22,7 +22,6 @@ https://huggingface.co/models?filter=masked-lm
 # You can also adapt this script on your own masked language modeling task. Pointers for this are left as comments.
 
 import logging
-import inspect
 import math
 import numpy
 import os
@@ -30,7 +29,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-from datasets import concatenate_datasets, load_dataset, load_metric
+from datasets import concatenate_datasets, load_dataset
 
 import transformers
 from transformers import (
@@ -46,13 +45,10 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
-from transformers.sparseml_utils import (
-    export_model,
-    preprocess_state_dict,
-    load_recipe
-)
+from transformers.sparse import export_model
 from sparseml_utils import (
     SparseMLMaskedLanguageModelingTrainer,
+    MaskedLanguageModelingModuleExporter
 )
 
 
@@ -304,29 +300,31 @@ def main():
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
-    import pdb; pdb.set_trace()
     # Load extra dataset if specified, and concatenate with the original one
     if data_args.dataset_name_2 is not None:
         # Downloading and loading a dataset from the hub.
         datasets_2 = load_dataset(data_args.dataset_name_2, data_args.dataset_config_name_2, cache_dir=model_args.cache_dir)
         if "validation" not in datasets_2.keys():
-            datasets_2["validation"] = load_dataset(
+            datasets_2_val = load_dataset(
                 data_args.dataset_name_2,
                 data_args.dataset_config_name_2,
                 split=f"train[:{data_args.validation_split_percentage}%]",
                 cache_dir=model_args.cache_dir,
             )
-            datasets_2["train"] = load_dataset(
+            datasets_2["validation"] = datasets_2_val.remove_columns("title")
+
+            datasets_2_train = load_dataset(
                 data_args.dataset_name_2,
                 data_args.dataset_config_name_2,
                 split=f"train[{data_args.validation_split_percentage}%:]",
                 cache_dir=model_args.cache_dir,
             )
+            datasets_2["train"] = datasets_2_train.remove_columns("title")
         # Concatenate two datasets
         if datasets is not None:
             for split in ["validation", "train"]:
                 datasets[split] = concatenate_datasets([datasets[split], datasets_2[split]])
-    
+
     # Load pretrained model and tokenizer
     #
     # Distributed training:
@@ -360,7 +358,6 @@ def main():
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
-    import pdb; pdb.set_trace()
     if model_args.model_name_or_path:
         model = AutoModelForMaskedLM.from_pretrained(
             model_args.model_name_or_path,
@@ -472,7 +469,6 @@ def main():
         #
         # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
         # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
-        import pdb; pdb.set_trace()
         tokenized_datasets = tokenized_datasets.map(
             group_texts,
             batched=True,
@@ -535,7 +531,7 @@ def main():
     #     vocab_size = prediction_scores.shape[-1]
     #     import pdb; pdb.set_trace()
     #     acc = accuracy(prediction_scores.view(-1, vocab_size).data, labels.view(-1))[0]
-        
+
     #     #predictions = numpy.argmax(logits, axis=-1)
     #     #return {accuracy_metric.compute(predictions=predictions, references=labels)}
     #     return {"accuracy": acc}
@@ -610,9 +606,7 @@ def main():
         logger.info("*** Export to ONNX ***")
         eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
         exporter = MaskedLanguageModelingModuleExporter(model, output_dir=data_args.onnx_export_path)
-        # TODO: how to use AutoModelForMaskedLM here to avoid specifying Bert?
-        forward_args_spec = inspect.getfullargspec(BertForMaskedLM.forward)
-        export_model(model, forward_args_spec, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
 
 def _mp_fn(index):
