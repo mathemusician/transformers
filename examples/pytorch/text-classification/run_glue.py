@@ -201,6 +201,12 @@ class ModelArguments:
             "with private models)."
         },
     )
+    export_onnx_model: bool = field(
+        default=False,
+        metadata={
+            "help": "workaround to get model to export to onnx"
+        }
+    )
 
 
 def main():
@@ -340,6 +346,7 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        export_onnx_model=model_args.export_onnx_model,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
@@ -592,6 +599,7 @@ def main():
     if data_args.onnx_export_path:
         logger.info("*** Export to ONNX ***")
         eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        model.config.export_onnx_model = True
         exporter = ModuleExporter(model, output_dir=data_args.onnx_export_path)
         export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
