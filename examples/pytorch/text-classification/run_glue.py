@@ -22,6 +22,7 @@ import random
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+from sparseml.pytorch.utils import ModuleExporter
 
 import wandb
 import numpy as np
@@ -229,7 +230,7 @@ def main():
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
-
+            
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -591,7 +592,8 @@ def main():
     if data_args.onnx_export_path:
         logger.info("*** Export to ONNX ***")
         eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
-        export_model(model, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+        exporter = ModuleExporter(model, output_dir=data_args.onnx_export_path)
+        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
 
 def _mp_fn(index):
