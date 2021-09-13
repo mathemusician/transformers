@@ -1544,7 +1544,12 @@ class BertForSequenceClassification(BertPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
         
         if self.config.export_onnx_model:
-            return (logits, torch.tensor(0))
+            return SequenceClassifierOutput(
+                loss=None,
+                logits=logits,
+                hidden_states=None,
+                attentions=None,
+            )
 
         return SequenceClassifierOutput(
             loss=loss,
