@@ -1538,13 +1538,13 @@ class BertForSequenceClassification(BertPreTrainedModel):
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(logits, labels)
-        
-        if self.config.export_onnx_model == True:
-            return (logits.long(), 0)
 
         if not return_dict:
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
+        
+        if self.config.export_onnx_model:
+            return (logits, torch.tensor(0))
 
         return SequenceClassifierOutput(
             loss=loss,
