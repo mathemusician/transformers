@@ -1540,7 +1540,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
                 loss = loss_fct(logits, labels)
         
         if self.config.export_onnx_model == True:
-            print('gotcha')
+            return (logits.long(), 0)
 
         if not return_dict:
             output = (logits,) + outputs[2:]
